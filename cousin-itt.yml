@@ -1,0 +1,140 @@
+variant: fcos
+version: 1.5.0
+
+# Section 1: Files to be created on the system
+storage:
+  files:
+    # Set the hostname
+    - path: /etc/hostname
+      mode: 0644
+      overwrite: true
+      contents:
+        inline: Cousin-Itt
+
+    # Configure SSH to use port 2222
+    - path: /etc/ssh/sshd_config.d/10-custom-port.conf
+      mode: 0644
+      contents:
+        inline: |
+          Port 2222
+
+    # Portainer Docker Compose file
+    - path: /etc/docker/compose/portainer.yml
+      mode: 0644
+      contents:
+        inline: |
+          version: '3.8'
+          services:
+            portainer:
+              image: portainer/portainer-ce:latest
+              container_name: portainer
+              restart: unless-stopped
+              ports:
+                - "9001:9000"
+                - "9443:9443"
+              volumes:
+                - /run/podman/podman.sock:/var/run/docker.sock
+                - /mnt/app-data/portainer:/data
+
+# Section 2: Systemd units for services, mounts, and first-boot setup
+systemd:
+  units:
+    # --- NFS Mounts ---
+    - name: mnt-app-data.mount
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Mount Synology App-Data Share
+        After=network-online.target
+        [Mount]
+        What=172.16.100.2:/volume2/app-data
+        Where=/mnt/app-data
+        Type=nfs
+        Options=defaults,noatime
+        [Install]
+        WantedBy=remote-fs.target
+
+    - name: mnt-media.mount
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Mount Synology Media Share
+        After=network-online.target
+        [Mount]
+        What=172.16.100.2:/volume2/media
+        Where=/mnt/media
+        Type=nfs
+        Options=defaults,noatime
+        [Install]
+        WantedBy=remote-fs.target
+
+    # --- First-boot package installers & setup (will cause reboots) ---
+    - name: ssh-custom-port-semanage.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Set SELinux port for custom SSH port
+        Wants=sshd.service
+        [Service]
+        Type=oneshot
+        ExecStart=/sbin/semanage port -a -t ssh_port_t -p tcp 2222
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: install-qemu-guest-agent.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Install QEMU Guest Agent
+        ConditionPathExists=!/etc/qemu-guest-agent-installed
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/bin/rpm-ostree install qemu-guest-agent
+        ExecStartPost=/usr/bin/touch /etc/qemu-guest-agent-installed
+        ExecStartPost=/sbin/reboot
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: install-podman-compose.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Install podman-compose
+        ConditionPathExists=!/etc/podman-compose-installed
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/bin/rpm-ostree install podman-compose
+        ExecStartPost=/usr/bin/touch /etc/podman-compose-installed
+        ExecStartPost=/sbin/reboot
+        [Install]
+        WantedBy=multi-user.target
+
+    # --- Application Services ---
+    - name: cockpit.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Cockpit Web Service
+        [Service]
+        ExecStartPre=-/bin/podman rm cockpit-ws
+        ExecStart=/bin/podman run --rm --privileged --name cockpit-ws -p 9090:9090 quay.io/cockpit/ws
+        Restart=always
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: portainer.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Run Portainer
+        Wants=network-online.target mnt-app-data.mount
+        After=network-online.target mnt-app-data.mount install-podman-compose.service
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        ExecStart=/usr/bin/podman-compose -f /etc/docker/compose/portainer.yml up -d
+        ExecStop=/usr/bin/podman-compose -f /etc/docker/compose/portainer.yml down
+        [Install]
+        WantedBy=multi-user.target

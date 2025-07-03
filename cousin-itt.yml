@@ -1,6 +1,16 @@
 variant: fcos
 version: 1.5.0
 
+# Authorize SSH keys for the 'core' user
+passwd:
+  users:
+    - name: core
+      ssh_authorized_keys:
+        # Key from your MacBook Air
+        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKSeJI0A8/Ab8lq7wjgW4E0o5uDRo95Mkw6pjSgo8tM shaunchit@gmail.com"
+        # Key from your Mac mini
+        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPwwCTWMr1/EJtDzO9U0nRBYyC5jvdrVlyaNYlUCaP2 shaunchit@gmail.com"
+
 # Section 1: Files to be created on the system
 storage:
   files:

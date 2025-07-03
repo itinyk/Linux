@@ -1,17 +1,17 @@
 variant: fcos
 version: 1.5.0
 
-# Authorize SSH keys for the 'core' user
+# Set up users (relying on SSH keys, no password hashes)
 passwd:
   users:
     - name: core
       ssh_authorized_keys:
-        # Key from your MacBook Air
-        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKSeJI0A8/Ab8lq7wjgW4E0o5uDRo95Mkw6pjSgo8tM shaunchit@gmail.com"
-        # Key from your Mac mini
-        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPwwCTWMr1/EJtDzO9U0nRBYyC5jvdrVlyaNYlUCaP2 shaunchit@gmail.com"
+        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE1AAAAIKSeJIOA8/AbB1q7WjgjW4E0o5uDRp95MKw6pjSgo8tM shaunchit@gmail.com" # Your primary key
+        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE1AAAAIPwwCTWMr1/EJt0zQ9U0nRBYyC5jvOrV1yaNYIlUCaP2 shaunchit@gmail.com" # Your Mac mini key
+    - name: root # Root user exists but will not have a password set by Ignition
+      # For root login, you would typically SSH as core, then 'sudo -i' or 'sudo su -'
 
-# Section 1: Files to be created on the system
+# Section 1: Files and Directories to be created on the system
 storage:
   files:
     # Set the hostname
@@ -20,13 +20,6 @@ storage:
       overwrite: true
       contents:
         inline: Cousin-Itt
-
-    # Configure SSH to use port 2222
-    - path: /etc/ssh/sshd_config.d/10-custom-port.conf
-      mode: 0644
-      contents:
-        inline: |
-          Port 2222
 
     # Portainer Docker Compose file
     - path: /etc/docker/compose/portainer.yml
@@ -44,13 +37,28 @@ storage:
                 - "9443:9443"
               volumes:
                 - /run/podman/podman.sock:/var/run/docker.sock
-                - /mnt/app-data/portainer:/data
+                - /var/mnt/app-data/portainer:/data # Volume path updated to canonical path
+
+  # Directories to be created for NFS mount points
+  directories:
+    - path: /var/mnt/media
+      mode: 0755 # Standard permissions for mount points
+      user:
+        name: root
+      group:
+        name: root
+    - path: /var/mnt/app-data
+      mode: 0755 # Standard permissions for mount points
+      user:
+        name: root
+      group:
+        name: root
 
 # Section 2: Systemd units for services, mounts, and first-boot setup
 systemd:
   units:
-    # --- NFS Mounts ---
-    - name: mnt-app-data.mount
+    # --- NFS Mounts (UPDATED NAME TO MATCH /var/mnt/ CANONICAL PATH) ---
+    - name: var-mnt-app-data.mount
       enabled: true
       contents: |
         [Unit]
@@ -58,13 +66,13 @@ systemd:
         After=network-online.target
         [Mount]
         What=172.16.100.2:/volume2/app-data
-        Where=/mnt/app-data
+        Where=/var/mnt/app-data
         Type=nfs
         Options=defaults,noatime
         [Install]
         WantedBy=remote-fs.target
 
-    - name: mnt-media.mount
+    - name: var-mnt-media.mount
       enabled: true
       contents: |
         [Unit]
@@ -72,25 +80,13 @@ systemd:
         After=network-online.target
         [Mount]
         What=172.16.100.2:/volume2/media
-        Where=/mnt/media
+        Where=/var/mnt/media
         Type=nfs
         Options=defaults,noatime
         [Install]
         WantedBy=remote-fs.target
 
     # --- First-boot package installers & setup (will cause reboots) ---
-    - name: ssh-custom-port-semanage.service
-      enabled: true
-      contents: |
-        [Unit]
-        Description=Set SELinux port for custom SSH port
-        Wants=sshd.service
-        [Service]
-        Type=oneshot
-        ExecStart=/sbin/semanage port -a -t ssh_port_t -p tcp 2222
-        [Install]
-        WantedBy=multi-user.target
-
     - name: install-qemu-guest-agent.service
       enabled: true
       contents: |
@@ -121,26 +117,54 @@ systemd:
         [Install]
         WantedBy=multi-user.target
 
-    # --- Application Services ---
-    - name: cockpit.service
+    # --- Install Cockpit Natively ---
+    - name: install-cockpit.service
       enabled: true
       contents: |
         [Unit]
-        Description=Cockpit Web Service
+        Description=Install Cockpit
+        ConditionPathExists=!/etc/cockpit-installed
         [Service]
-        ExecStartPre=-/bin/podman rm cockpit-ws
-        ExecStart=/bin/podman run --rm --privileged --name cockpit-ws -p 9090:9090 quay.io/cockpit/ws
-        Restart=always
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/bin/rpm-ostree install cockpit
+        ExecStartPost=/usr/bin/touch /etc/cockpit-installed
+        ExecStartPost=/sbin/reboot
         [Install]
         WantedBy=multi-user.target
 
+    # --- NEW: Enable Cockpit Socket and Firewall Rule After Installation ---
+    - name: enable-cockpit.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Enable and Start Cockpit Service After Installation
+        After=network-online.target
+        After=install-cockpit.service # For logical ordering, though Conditions handle actual run time
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes # So the service stays 'active'
+        ExecStart=/usr/bin/systemctl enable --now cockpit.socket # Enable and start the socket
+        ExecStartPost=/usr/bin/firewall-cmd --zone=public --add-service=cockpit --permanent # Add firewall rule
+        ExecStartPost=/usr/bin/firewall-cmd --reload # Reload firewall
+        ExecStartPost=/usr/bin/touch /etc/cockpit-enabled # Marker file so it only runs once
+        [Install]
+        WantedBy=multi-user.target
+      dropins:
+        - name: 10-conditions.conf
+          contents: |
+            [Unit]
+            ConditionPathExists=/etc/cockpit-installed # Only run if Cockpit package was installed
+            ConditionPathExists=!/etc/cockpit-enabled  # Only run if Cockpit hasn't been enabled yet
+
+    # --- Application Services (e.g., Portainer) ---
     - name: portainer.service
       enabled: true
       contents: |
         [Unit]
         Description=Run Portainer
-        Wants=network-online.target mnt-app-data.mount
-        After=network-online.target mnt-app-data.mount install-podman-compose.service
+        Wants=network-online.target var-mnt-app-data.mount
+        After=network-online.target var-mnt-app-data.mount install-podman-compose.service install-cockpit.service enable-cockpit.service # Add dependency on cockpit enablement
         [Service]
         Type=oneshot
         RemainAfterExit=true
